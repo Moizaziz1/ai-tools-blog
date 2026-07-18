@@ -1,307 +1,11 @@
-from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from contextlib import asynccontextmanager
-import asyncpg
-from typing import Optional, List
-from pydantic import BaseModel
-from datetime import datetime, timedelta
-import bcrypt
-from jose import JWTError, jwt
-import os
-from dotenv import load_dotenv
+import type { Article } from "./api";
 
-load_dotenv()
-
-SECRET_KEY = os.getenv("SECRET_KEY", "ai-tools-blog-secret-key-2024-change-in-production")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_HOURS = 24
-
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://neondb_owner:your_password@your-neon-host/neondb?sslmode=require"
-)
-
-db_pool = None
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-    await init_db()
-    yield
-    await db_pool.close()
-
-app = FastAPI(title="AI Tools Blog API", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://aitoolshub.com",
-        "https://www.aitoolshub.com",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-security = HTTPBearer()
-
-# ─── Models ───────────────────────────────────────────────────────────────────
-
-class ArticleCreate(BaseModel):
-    title: str
-    slug: str
-    content: str
-    excerpt: str
-    category: str
-    author: str = "Admin"
-    image_url: Optional[str] = None
-    meta_description: str
-    reading_time: int = 5
-    is_published: bool = True
-    tags: str = ""
-
-class ArticleUpdate(BaseModel):
-    title: Optional[str] = None
-    content: Optional[str] = None
-    excerpt: Optional[str] = None
-    category: Optional[str] = None
-    image_url: Optional[str] = None
-    meta_description: Optional[str] = None
-    reading_time: Optional[int] = None
-    is_published: Optional[bool] = None
-    tags: Optional[str] = None
-
-class AdminLogin(BaseModel):
-    username: str
-    password: str
-
-class AdminCreate(BaseModel):
-    username: str
-    password: str
-
-class ContactForm(BaseModel):
-    name: str
-    email: str
-    subject: str
-    message: str
-
-# ─── DB Init ──────────────────────────────────────────────────────────────────
-
-async def init_db():
-    async with db_pool.acquire() as conn:
-        try:
-            await conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS tags TEXT DEFAULT ''")
-        except Exception:
-            pass
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS articles (
-                id SERIAL PRIMARY KEY,
-                title TEXT NOT NULL,
-                slug TEXT UNIQUE NOT NULL,
-                content TEXT NOT NULL,
-                excerpt TEXT NOT NULL,
-                category TEXT NOT NULL,
-                author TEXT DEFAULT 'Admin',
-                image_url TEXT,
-                meta_description TEXT,
-                reading_time INT DEFAULT 5,
-                tags TEXT DEFAULT '',
-                is_published BOOLEAN DEFAULT true,
-                published_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        try:
-            await conn.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS tags TEXT DEFAULT ''")
-        except Exception:
-            pass
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS admins (
-                id SERIAL PRIMARY KEY,
-                username TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        # Create default admin if none exists
-        exists = await conn.fetchval("SELECT COUNT(*) FROM admins")
-        if exists == 0:
-            admin_user = os.getenv("ADMIN_USERNAME", "admin")
-            admin_pass = os.getenv("ADMIN_PASSWORD", "admin123")
-            hashed = bcrypt.hashpw(admin_pass.encode(), bcrypt.gensalt()).decode()
-            await conn.execute(
-                "INSERT INTO admins (username, password_hash) VALUES ($1, $2)",
-                admin_user, hashed
-            )
-        # Seed articles if none exist
-        count = await conn.fetchval("SELECT COUNT(*) FROM articles")
-        if count == 0:
-            await seed_articles(conn)
-        # Seed additional trending articles
-        await seed_additional_articles(conn)
-
-# ─── Auth Helpers ─────────────────────────────────────────────────────────────
-
-def create_token(data: dict):
-    to_encode = data.copy()
-    to_encode["exp"] = datetime.utcnow() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-async def get_current_admin(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        if not username:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        return username
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-# ─── Auth Routes ──────────────────────────────────────────────────────────────
-
-@app.post("/api/admin/login")
-async def login(data: AdminLogin):
-    async with db_pool.acquire() as conn:
-        admin = await conn.fetchrow("SELECT * FROM admins WHERE username=$1", data.username)
-        if not admin or not bcrypt.checkpw(data.password.encode(), admin["password_hash"].encode()):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-        token = create_token({"sub": admin["username"]})
-        return {"access_token": token, "token_type": "bearer"}
-
-# ─── Contact Route ─────────────────────────────────────────────────────────────
-
-@app.post("/api/contact")
-async def contact_form(data: ContactForm):
-    return {"message": "Thank you for your message. We will get back to you within 48 hours."}
-
-# ─── Article Routes ───────────────────────────────────────────────────────────
-
-@app.get("/api/articles")
-async def get_articles(
-    page: int = 1,
-    limit: int = 12,
-    category: Optional[str] = None,
-    search: Optional[str] = None
-):
-    offset = (page - 1) * limit
-    async with db_pool.acquire() as conn:
-        query = "SELECT * FROM articles WHERE is_published=true"
-        count_query = "SELECT COUNT(*) FROM articles WHERE is_published=true"
-        params = []
-        
-        if category:
-            params.append(category)
-            query += f" AND category=${len(params)}"
-            count_query += f" AND category=${len(params)}"
-        if search:
-            params.append(f"%{search}%")
-            query += f" AND (title ILIKE ${len(params)} OR excerpt ILIKE ${len(params)})"
-            count_query += f" AND (title ILIKE ${len(params)} OR excerpt ILIKE ${len(params)})"
-        
-        total = await conn.fetchval(count_query, *params)
-        params.extend([limit, offset])
-        query += f" ORDER BY published_at DESC LIMIT ${len(params)-1} OFFSET ${len(params)}"
-        rows = await conn.fetch(query, *params)
-        
-        return {
-            "articles": [dict(r) for r in rows],
-            "total": total,
-            "page": page,
-            "pages": (total + limit - 1) // limit
-        }
-
-@app.get("/api/articles/{slug}")
-async def get_article(slug: str):
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM articles WHERE slug=$1 AND is_published=true", slug
-        )
-        if not row:
-            raise HTTPException(status_code=404, detail="Article not found")
-        return dict(row)
-
-@app.get("/api/categories")
-async def get_categories():
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT category, COUNT(*) as count FROM articles WHERE is_published=true GROUP BY category ORDER BY count DESC"
-        )
-        return [dict(r) for r in rows]
-
-# ─── Admin Article Routes ─────────────────────────────────────────────────────
-
-@app.get("/api/admin/articles")
-async def admin_get_articles(admin=Depends(get_current_admin)):
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM articles ORDER BY published_at DESC")
-        return [dict(r) for r in rows]
-
-@app.post("/api/admin/articles", status_code=201)
-async def create_article(article: ArticleCreate, admin=Depends(get_current_admin)):
-    async with db_pool.acquire() as conn:
-        try:
-            row = await conn.fetchrow(
-                """INSERT INTO articles 
-                   (title, slug, content, excerpt, category, author, image_url, meta_description, reading_time, is_published, tags)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *""",
-                article.title, article.slug, article.content, article.excerpt,
-                article.category, article.author, article.image_url,
-                article.meta_description, article.reading_time, article.is_published, article.tags
-            )
-            return dict(row)
-        except asyncpg.UniqueViolationError:
-            raise HTTPException(status_code=400, detail="Slug already exists")
-
-@app.put("/api/admin/articles/{article_id}")
-async def update_article(article_id: int, article: ArticleUpdate, admin=Depends(get_current_admin)):
-    async with db_pool.acquire() as conn:
-        updates = {k: v for k, v in article.dict().items() if v is not None}
-        if not updates:
-            raise HTTPException(status_code=400, detail="No fields to update")
-        
-        set_parts = [f"{k}=${i+2}" for i, k in enumerate(updates.keys())]
-        set_parts.append("updated_at=NOW()")
-        values = list(updates.values())
-        
-        row = await conn.fetchrow(
-            f"UPDATE articles SET {', '.join(set_parts)} WHERE id=$1 RETURNING *",
-            article_id, *values
-        )
-        if not row:
-            raise HTTPException(status_code=404, detail="Article not found")
-        return dict(row)
-
-@app.delete("/api/admin/articles/{article_id}")
-async def delete_article(article_id: int, admin=Depends(get_current_admin)):
-    async with db_pool.acquire() as conn:
-        result = await conn.execute("DELETE FROM articles WHERE id=$1", article_id)
-        if result == "DELETE 0":
-            raise HTTPException(status_code=404, detail="Article not found")
-        return {"message": "Article deleted"}
-
-@app.get("/api/admin/stats")
-async def get_stats(admin=Depends(get_current_admin)):
-    async with db_pool.acquire() as conn:
-        total = await conn.fetchval("SELECT COUNT(*) FROM articles")
-        published = await conn.fetchval("SELECT COUNT(*) FROM articles WHERE is_published=true")
-        categories = await conn.fetchval("SELECT COUNT(DISTINCT category) FROM articles")
-        return {"total": total, "published": published, "drafts": total - published, "categories": categories}
-
-# ─── Seed Data ────────────────────────────────────────────────────────────────
-
-async def seed_articles(conn):
-    articles = [
-        {
-            "title": "ChatGPT Review 2024: Is It Still the Best AI Chatbot?",
-            "slug": "chatgpt-review-2024",
-            "category": "AI Chatbots",
-            "excerpt": "ChatGPT changed everything when it launched. But now that the market is flooded with competitors, does it still hold up? Here's my honest take after using it daily for over a year.",
-            "reading_time": 8,
-            "meta_description": "Honest ChatGPT review 2024 — features, pricing, pros and cons from a daily user.",
-            "content": """## My Honest Take on ChatGPT After Using It Every Single Day
+export const mockArticles: Article[] = [
+  {
+    id: 1,
+    title: "ChatGPT Review 2024: Is It Still the Best AI Chatbot?",
+    slug: "chatgpt-review-2024",
+    content: `## My Honest Take on ChatGPT After Using It Every Single Day
 
 Let me be upfront — I was skeptical when ChatGPT first launched. Another chatbot? I'd seen those before and they were always underwhelming. But within the first week, I realized this was genuinely different.
 
@@ -335,16 +39,23 @@ If you're just curious and want to try AI, the free tier is a perfectly decent s
 
 ChatGPT is still the most well-rounded AI assistant available. It's not always the best at any single thing, but the combination of quality, versatility, and the massive plugin ecosystem makes it the default choice for most people.
 
-**Rating: 4.5/5** — A few rough edges, but still the benchmark everything else gets measured against."""
-        },
-        {
-            "title": "Midjourney vs DALL-E 3: Which AI Image Generator Should You Use?",
-            "slug": "midjourney-vs-dalle-3-comparison",
-            "category": "AI Image Generation",
-            "excerpt": "After spending weeks testing both tools with hundreds of prompts, I finally have a clear answer on which image generator wins — and it might not be the one you expect.",
-            "reading_time": 9,
-            "meta_description": "Midjourney vs DALL-E 3 in-depth comparison — quality, pricing, ease of use, and which one wins in 2024.",
-            "content": """## Midjourney vs DALL-E 3: The Real Comparison Nobody's Having
+**Rating: 4.5/5** — A few rough edges, but still the benchmark everything else gets measured against.`,
+    excerpt: "ChatGPT changed everything when it launched. But now that the market is flooded with competitors, does it still hold up? Here's my honest take after using it daily for over a year.",
+    category: "AI Chatbots",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Honest ChatGPT review 2024 — features, pricing, pros and cons from a daily user.",
+    reading_time: 8,
+    tags: "",
+    is_published: true,
+    published_at: "2024-10-01T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 2,
+    title: "Midjourney vs DALL-E 3: Which AI Image Generator Should You Use?",
+    slug: "midjourney-vs-dalle-3-comparison",
+    content: `## Midjourney vs DALL-E 3: The Real Comparison Nobody's Having
 
 I've seen a lot of "comparisons" between these two tools online that basically just show you a few sample images and call it a day. That's not a real comparison. I've spent weeks generating hundreds of images with both, testing specific use cases, and here's what I actually found.
 
@@ -384,16 +95,23 @@ Use Midjourney if you're doing creative, artistic, or photorealistic work and ae
 
 Use DALL-E 3 if you need prompt precision, text in images, or you're already a ChatGPT user and don't want to pay extra.
 
-Honestly? If budget allows, use both. They complement each other well."""
-        },
-        {
-            "title": "GitHub Copilot Review: A Developer's Honest Assessment",
-            "slug": "github-copilot-review-developer-assessment",
-            "category": "AI Coding Tools",
-            "excerpt": "I've been using GitHub Copilot for almost two years now. Here's the real story — when it helps, when it hurts, and whether the $10/month is worth it for your specific situation.",
-            "reading_time": 7,
-            "meta_description": "Honest GitHub Copilot review from a developer who's used it for 2 years — what works, what doesn't, and is it worth the price.",
-            "content": """## GitHub Copilot After Two Years: The Honest Developer Review
+Honestly? If budget allows, use both. They complement each other well.`,
+    excerpt: "After spending weeks testing both tools with hundreds of prompts, I finally have a clear answer on which image generator wins — and it might not be the one you expect.",
+    category: "AI Image Generation",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Midjourney vs DALL-E 3 in-depth comparison — quality, pricing, ease of use, and which one wins in 2024.",
+    reading_time: 9,
+    tags: "",
+    is_published: true,
+    published_at: "2024-10-05T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 3,
+    title: "GitHub Copilot Review: A Developer's Honest Assessment",
+    slug: "github-copilot-review-developer-assessment",
+    content: `## GitHub Copilot After Two Years: The Honest Developer Review
 
 There's a lot of hype around AI coding tools. There's also a lot of backlash. After two years of daily use across multiple languages and project types, I think I've got a nuanced enough view to cut through both.
 
@@ -431,16 +149,23 @@ For occasional coders: maybe not. The benefit comes from daily use where it lear
 
 I use Copilot in VS Code with autocomplete enabled but I've turned off the "ghost text" feature that shows inline suggestions — I found it distracting. Instead, I use it on demand with keyboard shortcuts when I want a suggestion. This gives me the benefits without the constant visual noise.
 
-**Bottom line:** It's a legitimate productivity tool when used by experienced developers who read what it generates. It's a crutch that creates problems when treated as an automatic code generator."""
-        },
-        {
-            "title": "Notion AI: Does It Actually Make You More Productive?",
-            "slug": "notion-ai-productivity-review",
-            "category": "AI Productivity Tools",
-            "excerpt": "Notion AI promises to transform how you work with documents and notes. After three months of heavy use, here's my verdict — and why the answer is more complicated than a simple yes or no.",
-            "reading_time": 6,
-            "meta_description": "Notion AI review after 3 months of heavy use — does it actually improve productivity or is it just a fancy add-on?",
-            "content": """## Notion AI: Three Months In — The Honest Productivity Report
+**Bottom line:** It's a legitimate productivity tool when used by experienced developers who read what it generates. It's a crutch that creates problems when treated as an automatic code generator.`,
+    excerpt: "I've been using GitHub Copilot for almost two years now. Here's the real story — when it helps, when it hurts, and whether the $10/month is worth it for your specific situation.",
+    category: "AI Coding Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Honest GitHub Copilot review from a developer who's used it for 2 years — what works, what doesn't, and is it worth the price.",
+    reading_time: 7,
+    tags: "",
+    is_published: true,
+    published_at: "2024-10-08T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 4,
+    title: "Notion AI: Does It Actually Make You More Productive?",
+    slug: "notion-ai-productivity-review",
+    content: `## Notion AI: Three Months In — The Honest Productivity Report
 
 I went into this experiment genuinely hoping Notion AI would be useful. I already used Notion heavily for project management, notes, and documentation. Adding AI capabilities to a tool I already lived in seemed like it should be a natural win.
 
@@ -472,16 +197,23 @@ Is it worth it? For heavy writers who live in Notion, probably yes. For project 
 
 I use Notion AI for three things: cleaning up rough drafts, summarizing long notes, and quickly generating first-draft outlines when I'm stuck staring at a blank page. For everything else, I switch to ChatGPT.
 
-The tool works best when you already have content to work *with*, not when you're trying to generate content from scratch."""
-        },
-        {
-            "title": "Perplexity AI Review: The Search Engine That Actually Cites Sources",
-            "slug": "perplexity-ai-review-search-engine",
-            "category": "AI Search & Research",
-            "excerpt": "What if Google and ChatGPT had a baby that actually showed you where it got its information? That's essentially Perplexity AI — and it's changed how I do research.",
-            "reading_time": 7,
-            "meta_description": "Perplexity AI review — how it compares to Google and ChatGPT for research, and when to use it.",
-            "content": """## Why Perplexity AI Has Quietly Become My Default Research Tool
+The tool works best when you already have content to work *with*, not when you're trying to generate content from scratch.`,
+    excerpt: "Notion AI promises to transform how you work with documents and notes. After three months of heavy use, here's my verdict — and why the answer is more complicated than a simple yes or no.",
+    category: "AI Productivity Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Notion AI review after 3 months of heavy use — does it actually improve productivity or is it just a fancy add-on?",
+    reading_time: 6,
+    tags: "",
+    is_published: true,
+    published_at: "2024-10-12T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 5,
+    title: "Perplexity AI Review: The Search Engine That Actually Cites Sources",
+    slug: "perplexity-ai-review-search-engine",
+    content: `## Why Perplexity AI Has Quietly Become My Default Research Tool
 
 I resisted Perplexity for a long time. I had Google for search, ChatGPT for questions — what was a third tool going to add?
 
@@ -521,16 +253,23 @@ And like all AI tools, it can still be wrong. The citations help you verify, but
 
 **Use ChatGPT when:** You need reasoning, creative work, code help, or long-form content generation.
 
-These three tools complement each other. Perplexity has genuinely earned its place in my daily toolkit."""
-        },
-        {
-            "title": "Claude AI vs ChatGPT: Which One Should You Actually Use?",
-            "slug": "claude-ai-vs-chatgpt-comparison",
-            "category": "AI Chatbots",
-            "excerpt": "Claude has been quietly getting better while everyone's been focused on ChatGPT. After extensive testing across dozens of tasks, here's my real comparison — including the surprising areas where Claude wins.",
-            "reading_time": 9,
-            "meta_description": "Claude vs ChatGPT honest comparison in 2024 — which AI assistant is better for writing, coding, reasoning, and daily use.",
-            "content": """## Claude vs ChatGPT: The Comparison That Changed My Mind
+These three tools complement each other. Perplexity has genuinely earned its place in my daily toolkit.`,
+    excerpt: "What if Google and ChatGPT had a baby that actually showed you where it got its information? That's essentially Perplexity AI — and it's changed how I do research.",
+    category: "AI Search & Research",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Perplexity AI review — how it compares to Google and ChatGPT for research, and when to use it.",
+    reading_time: 7,
+    tags: "",
+    is_published: true,
+    published_at: "2024-10-15T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 6,
+    title: "Claude AI vs ChatGPT: Which One Should You Actually Use?",
+    slug: "claude-ai-vs-chatgpt-comparison",
+    content: `## Claude vs ChatGPT: The Comparison That Changed My Mind
 
 I'll admit — I started this comparison expecting ChatGPT to win. It had the head start, the brand recognition, and the plugin ecosystem. But after six weeks of running both through every task type I could think of, Claude genuinely surprised me.
 
@@ -578,16 +317,23 @@ If you want **one tool**: ChatGPT, because the ecosystem and integrations cover 
 
 If you do **a lot of writing or research**: Claude is genuinely better for these tasks.
 
-Ideally, you'd use both. They have different strengths and knowing which to reach for when is a skill worth developing."""
-        },
-        {
-            "title": "ElevenLabs AI Voice Generator: The Tool That Makes Text Sound Human",
-            "slug": "elevenlabs-ai-voice-generator-review",
-            "category": "AI Audio Tools",
-            "excerpt": "I've tested every major text-to-speech tool available and ElevenLabs is in a completely different category. Here's what makes it special and who should actually be using it.",
-            "reading_time": 6,
-            "meta_description": "ElevenLabs review — the best AI text-to-speech tool available, who it's for, and is it worth the price.",
-            "content": """## ElevenLabs: Why This AI Voice Tool Sounds Frighteningly Human
+Ideally, you'd use both. They have different strengths and knowing which to reach for when is a skill worth developing.`,
+    excerpt: "Claude has been quietly getting better while everyone's been focused on ChatGPT. After extensive testing across dozens of tasks, here's my real comparison — including the surprising areas where Claude wins.",
+    category: "AI Chatbots",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Claude vs ChatGPT honest comparison in 2024 — which AI assistant is better for writing, coding, reasoning, and daily use.",
+    reading_time: 9,
+    tags: "",
+    is_published: true,
+    published_at: "2024-10-18T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 7,
+    title: "ElevenLabs AI Voice Generator: The Tool That Makes Text Sound Human",
+    slug: "elevenlabs-ai-voice-generator-review",
+    content: `## ElevenLabs: Why This AI Voice Tool Sounds Frighteningly Human
 
 The first time I heard audio generated by ElevenLabs, I genuinely couldn't tell it was AI-generated. I asked a colleague to listen and guess — they thought it was a podcast recording.
 
@@ -639,16 +385,23 @@ For content creators who need quality voice audio regularly: absolutely. The pro
 
 For occasional personal use: the free tier is genuinely useful.
 
-For developers: the API quality is excellent and the pricing is competitive."""
-        },
-        {
-            "title": "Runway ML Gen-3 Review: AI Video Generation Has Finally Arrived",
-            "slug": "runway-ml-gen3-review-ai-video",
-            "category": "AI Video Tools",
-            "excerpt": "AI video generation has been mostly disappointing — until now. Runway's Gen-3 Alpha produced results that made my jaw drop. But there are still real limitations you need to know about.",
-            "reading_time": 7,
-            "meta_description": "Runway ML Gen-3 review — how good is AI video generation now, what it can do, and real limitations from testing.",
-            "content": """## Runway Gen-3: AI Video That Finally Looks Like It Could Be Real
+For developers: the API quality is excellent and the pricing is competitive.`,
+    excerpt: "I've tested every major text-to-speech tool available and ElevenLabs is in a completely different category. Here's what makes it special and who should actually be using it.",
+    category: "AI Audio Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "ElevenLabs review — the best AI text-to-speech tool available, who it's for, and is it worth the price.",
+    reading_time: 6,
+    tags: "",
+    is_published: true,
+    published_at: "2024-10-22T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 8,
+    title: "Runway ML Gen-3 Review: AI Video Generation Has Finally Arrived",
+    slug: "runway-ml-gen3-review-ai-video",
+    content: `## Runway Gen-3: AI Video That Finally Looks Like It Could Be Real
 
 I've been following AI video generation since Runway's first generation models. Gen-1 was impressive for the technology but obviously artificial. Gen-2 was a real step forward. Gen-3 Alpha is in a completely different category.
 
@@ -688,16 +441,23 @@ For professional users doing high-volume work, you'll need the Unlimited plan or
 
 Gen-3 has crossed the threshold from "impressive tech demo" to "actually useful creative tool" — for specific use cases. Social media content, product visualization, motion design, and establishing shots are all viable applications today.
 
-Full narrative video creation is still in the future. But that future looks significantly closer than it did a year ago."""
-        },
-        {
-            "title": "Jasper AI Review 2024: Is It Still Worth the Premium Price?",
-            "slug": "jasper-ai-review-2024-worth-premium",
-            "category": "AI Writing Tools",
-            "excerpt": "Jasper used to be the go-to AI writing tool for marketers. But with ChatGPT and Claude now offering similar capabilities for less, does Jasper still justify its higher price tag?",
-            "reading_time": 7,
-            "meta_description": "Jasper AI review 2024 — is it still worth the price compared to ChatGPT and other cheaper alternatives?",
-            "content": """## Jasper AI in 2024: Honest Assessment of Whether It's Still Worth It
+Full narrative video creation is still in the future. But that future looks significantly closer than it did a year ago.`,
+    excerpt: "AI video generation has been mostly disappointing — until now. Runway's Gen-3 Alpha produced results that made my jaw drop. But there are still real limitations you need to know about.",
+    category: "AI Video Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Runway ML Gen-3 review — how good is AI video generation now, what it can do, and real limitations from testing.",
+    reading_time: 7,
+    tags: "",
+    is_published: true,
+    published_at: "2024-10-25T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 9,
+    title: "Jasper AI Review 2024: Is It Still Worth the Premium Price?",
+    slug: "jasper-ai-review-2024-worth-premium",
+    content: `## Jasper AI in 2024: Honest Assessment of Whether It's Still Worth It
 
 I used Jasper when it was called Jarvis, back before the rebrand, and it was genuinely one of the best AI writing tools available. The templates were helpful, the output quality was strong, and for marketers doing high-volume content work, it saved real time.
 
@@ -731,16 +491,23 @@ Compare this to $20/month for ChatGPT Plus. You're paying a premium for the mark
 
 **Probably not worth it for:** Solo creators, small businesses without complex brand voice needs, developers or writers comfortable building their own prompting systems, anyone primarily doing one type of content.
 
-The truth is that Jasper has had to evolve into more of a workflow and collaboration platform than a pure AI writing tool, because the core AI capabilities are now commoditized. If their unique features solve real problems in your workflow, the premium makes sense. If not, you can get similar output for less."""
-        },
-        {
-            "title": "Adobe Firefly Review: AI Image Generation for Professionals",
-            "slug": "adobe-firefly-review-professional",
-            "category": "AI Image Generation",
-            "excerpt": "Adobe Firefly takes a different approach to AI image generation — one that actually matters for professional creative work. Here's what makes it unique and why copyright-safe AI generation is a bigger deal than you might think.",
-            "reading_time": 7,
-            "meta_description": "Adobe Firefly review — commercial safety, integration with Photoshop, and how it compares to Midjourney for professional use.",
-            "content": """## Adobe Firefly: The AI Image Tool Built for Professionals Who Have Lawyers
+The truth is that Jasper has had to evolve into more of a workflow and collaboration platform than a pure AI writing tool, because the core AI capabilities are now commoditized. If their unique features solve real problems in your workflow, the premium makes sense. If not, you can get similar output for less.`,
+    excerpt: "Jasper used to be the go-to AI writing tool for marketers. But with ChatGPT and Claude now offering similar capabilities for less, does Jasper still justify its higher price tag?",
+    category: "AI Writing Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Jasper AI review 2024 — is it still worth the price compared to ChatGPT and other cheaper alternatives?",
+    reading_time: 7,
+    tags: "",
+    is_published: true,
+    published_at: "2024-10-28T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 10,
+    title: "Adobe Firefly Review: AI Image Generation for Professionals",
+    slug: "adobe-firefly-review-professional",
+    content: `## Adobe Firefly: The AI Image Tool Built for Professionals Who Have Lawyers
 
 Most AI image generators have a copyright problem. They were trained on images scraped from the internet, often without the creators' permission, and the legal status of images generated from that training data is genuinely murky.
 
@@ -780,16 +547,23 @@ If you're a commercial content creator worried about copyright exposure: Firefly
 
 If you're an artist or creative explorer primarily interested in artistic output quality: Midjourney remains a stronger choice.
 
-The right answer for many professionals is using Firefly for commercial work within the Adobe ecosystem and Midjourney for personal creative projects."""
-        },
-        {
-            "title": "Cursor AI Code Editor Review: The IDE That Thinks Like a Developer",
-            "slug": "cursor-ai-code-editor-review",
-            "category": "AI Coding Tools",
-            "excerpt": "Cursor isn't just an AI assistant bolted onto an existing editor — it was built from scratch with AI at the center. After two months of using it as my primary IDE, here's my comprehensive review.",
-            "reading_time": 8,
-            "meta_description": "Cursor AI code editor review — how it compares to VS Code + Copilot, what makes it different, and is it worth switching.",
-            "content": """## Cursor: Why This AI Code Editor Made Me Switch From VS Code
+The right answer for many professionals is using Firefly for commercial work within the Adobe ecosystem and Midjourney for personal creative projects.`,
+    excerpt: "Adobe Firefly takes a different approach to AI image generation — one that actually matters for professional creative work. Here's what makes it unique and why copyright-safe AI generation is a bigger deal than you might think.",
+    category: "AI Image Generation",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Adobe Firefly review — commercial safety, integration with Photoshop, and how it compares to Midjourney for professional use.",
+    reading_time: 7,
+    tags: "",
+    is_published: true,
+    published_at: "2024-11-01T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 11,
+    title: "Cursor AI Code Editor Review: The IDE That Thinks Like a Developer",
+    slug: "cursor-ai-code-editor-review",
+    content: `## Cursor: Why This AI Code Editor Made Me Switch From VS Code
 
 I've been using VS Code for years. It's familiar, extensible, and with GitHub Copilot, has decent AI assistance built in. I didn't think I needed another editor.
 
@@ -835,16 +609,23 @@ For developers who mostly write standalone scripts or simple applications: VS Co
 
 For developers working in teams: check how your team handles the sync of Cursor settings, because the configuration and rules system works best when the whole team adopts it.
 
-My two months with Cursor has convinced me that codebase-aware AI is where professional coding tools need to be heading. The question isn't whether this approach is better — it clearly is. The question is whether the current price and feature set work for your specific situation."""
-        },
-        {
-            "title": "Google Gemini Review: Is Google's AI Finally Competitive?",
-            "slug": "google-gemini-review-competitive",
-            "category": "AI Chatbots",
-            "excerpt": "Google was supposed to have the AI advantage — they invented the transformer architecture that powers everything. So why did it take them so long to catch up? And have they finally done it with Gemini?",
-            "reading_time": 8,
-            "meta_description": "Google Gemini review — how it compares to ChatGPT and Claude, what's unique about Gemini, and is it worth using in 2024.",
-            "content": """## Google Gemini: The Comeback Story That's Still Being Written
+My two months with Cursor has convinced me that codebase-aware AI is where professional coding tools need to be heading. The question isn't whether this approach is better — it clearly is. The question is whether the current price and feature set work for your specific situation.`,
+    excerpt: "Cursor isn't just an AI assistant bolted onto an existing editor — it was built from scratch with AI at the center. After two months of using it as my primary IDE, here's my comprehensive review.",
+    category: "AI Coding Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Cursor AI code editor review — how it compares to VS Code + Copilot, what makes it different, and is it worth switching.",
+    reading_time: 8,
+    tags: "",
+    is_published: true,
+    published_at: "2024-11-05T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 12,
+    title: "Google Gemini Review: Is Google's AI Finally Competitive?",
+    slug: "google-gemini-review-competitive",
+    content: `## Google Gemini: The Comeback Story That's Still Being Written
 
 There's something almost ironic about Google's AI journey. The company that published the original transformer paper, that built TensorFlow, that had arguably the world's best AI researchers — found itself playing catch-up to OpenAI and Anthropic.
 
@@ -890,16 +671,23 @@ People who want the largest possible context window for research tasks.
 
 Gemini in 2024 is not the disappointment it was at launch. It's a capable, sometimes impressive AI assistant with genuine advantages in specific areas. It's not yet the default recommendation for most people — ChatGPT's ecosystem and Claude's reasoning quality both have edges.
 
-But if you're a Google Workspace user who's been dismissing Gemini based on its rough start, it's worth another look. The gap has narrowed considerably."""
-        },
-        {
-            "title": "Copy.ai Review: The AI Copywriting Tool for Marketing Teams",
-            "slug": "copy-ai-review-marketing-teams",
-            "category": "AI Writing Tools",
-            "excerpt": "Copy.ai has positioned itself specifically for marketing and sales teams, not general writing. After testing it extensively for marketing copy use cases, here's where it excels and where you might be better served elsewhere.",
-            "reading_time": 6,
-            "meta_description": "Copy.ai review for marketing teams — what it does well, pricing, and how it compares to Jasper and ChatGPT for marketing copy.",
-            "content": """## Copy.ai: Built for Marketers, Not Writers in General
+But if you're a Google Workspace user who's been dismissing Gemini based on its rough start, it's worth another look. The gap has narrowed considerably.`,
+    excerpt: "Google was supposed to have the AI advantage — they invented the transformer architecture that powers everything. So why did it take them so long to catch up? And have they finally done it with Gemini?",
+    category: "AI Chatbots",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Google Gemini review — how it compares to ChatGPT and Claude, what's unique about Gemini, and is it worth using in 2024.",
+    reading_time: 8,
+    tags: "",
+    is_published: true,
+    published_at: "2024-11-08T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 13,
+    title: "Copy.ai Review: The AI Copywriting Tool for Marketing Teams",
+    slug: "copy-ai-review-marketing-teams",
+    content: `## Copy.ai: Built for Marketers, Not Writers in General
 
 Most AI writing tools try to be everything to everyone. Copy.ai made a different choice — it decided to focus on marketing and sales copy specifically. That specificity shows, both as a strength and as a limitation.
 
@@ -935,16 +723,23 @@ For marketing teams doing high-volume campaign copy, social media content, and e
 
 For individuals or general use — the savings over just using ChatGPT with a good marketing prompt library don't clearly justify the cost.
 
-For sales teams specifically — the sales-focused templates and outreach copy tools are worth evaluating. The specialized training shows in the output."""
-        },
-        {
-            "title": "Grammarly AI Review: Grammar Checker or Full Writing Assistant?",
-            "slug": "grammarly-ai-review-writing-assistant",
-            "category": "AI Writing Tools",
-            "excerpt": "Grammarly started as a grammar checker. Now it's trying to become a full AI writing assistant. Does the evolution work? After using it daily for writing and editing, here's my assessment.",
-            "reading_time": 6,
-            "meta_description": "Grammarly AI review 2024 — how the grammar checker has evolved into an AI writing assistant and whether it's worth Premium.",
-            "content": """## Grammarly in 2024: Still Useful, But Facing Real Competition
+For sales teams specifically — the sales-focused templates and outreach copy tools are worth evaluating. The specialized training shows in the output.`,
+    excerpt: "Copy.ai has positioned itself specifically for marketing and sales teams, not general writing. After testing it extensively for marketing copy use cases, here's where it excels and where you might be better served elsewhere.",
+    category: "AI Writing Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Copy.ai review for marketing teams — what it does well, pricing, and how it compares to Jasper and ChatGPT for marketing copy.",
+    reading_time: 6,
+    tags: "",
+    is_published: true,
+    published_at: "2024-11-10T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 14,
+    title: "Grammarly AI Review: Grammar Checker or Full Writing Assistant?",
+    slug: "grammarly-ai-review-writing-assistant",
+    content: `## Grammarly in 2024: Still Useful, But Facing Real Competition
 
 Grammarly has been my default writing tool for years. It lives in my browser, my Google Docs, my email — it's become invisible infrastructure for my writing workflow. So when they started adding AI writing features, I paid close attention.
 
@@ -990,16 +785,23 @@ What Grammarly still uniquely has is the embedded workflow — the fact that it'
 
 ### My Verdict
 
-Keep using Grammarly for the browser extension and the deep editing features. Don't expect GrammarlyGO to replace ChatGPT for generation tasks. The combination of Grammarly for editing + dedicated AI tools for generation is probably better than relying on either alone."""
-        },
-        {
-            "title": "Sora Review: OpenAI's Text-to-Video Model and What It Actually Means",
-            "slug": "sora-openai-text-to-video-review",
-            "category": "AI Video Tools",
-            "excerpt": "Sora generated enormous hype with its preview videos. Now that access has expanded, I've been able to test it extensively. Here's what Sora can actually do — and why it's both impressive and more limited than the demos suggested.",
-            "reading_time": 8,
-            "meta_description": "Sora review — OpenAI's text-to-video model tested extensively: what works, what doesn't, and what it means for video production.",
-            "content": """## Sora: Beyond the Demo Videos — What It's Actually Like to Use
+Keep using Grammarly for the browser extension and the deep editing features. Don't expect GrammarlyGO to replace ChatGPT for generation tasks. The combination of Grammarly for editing + dedicated AI tools for generation is probably better than relying on either alone.`,
+    excerpt: "Grammarly started as a grammar checker. Now it's trying to become a full AI writing assistant. Does the evolution work? After using it daily for writing and editing, here's my assessment.",
+    category: "AI Writing Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Grammarly AI review 2024 — how the grammar checker has evolved into an AI writing assistant and whether it's worth Premium.",
+    reading_time: 6,
+    tags: "",
+    is_published: true,
+    published_at: "2024-11-13T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 15,
+    title: "Sora Review: OpenAI's Text-to-Video Model and What It Actually Means",
+    slug: "sora-openai-text-to-video-review",
+    content: `## Sora: Beyond the Demo Videos — What It's Actually Like to Use
 
 When OpenAI first revealed Sora in early 2024, the preview videos were jaw-dropping. Photorealistic scenes, complex motion, cinematic quality. The film industry held its breath.
 
@@ -1047,31 +849,23 @@ What Sora is not yet: a tool that can create narrative films, produce consistent
 
 Sora represents a genuine technology achievement. But the gap between the curated demo videos and the actual production experience is real and significant. The demos showed Sora's ceiling; daily use reveals the floor.
 
-The technology is improving rapidly. The Sora of six months from now will likely be significantly more capable. For now, it's a powerful creative tool with real limitations that require creative workarounds."""
-        },
-    ]
-    
-    for a in articles:
-        await conn.execute(
-            """INSERT INTO articles 
-               (title, slug, content, excerpt, category, reading_time, meta_description, author, is_published)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-               ON CONFLICT (slug) DO NOTHING""",
-            a["title"], a["slug"], a["content"], a["excerpt"],
-            a["category"], a["reading_time"], a["meta_description"],
-            "Admin", True
-        )
-
-async def seed_additional_articles(conn):
-    articles = [
-        {
-            "title": "v0 by Vercel Review: AI That Generates Production-Ready UI Code",
-            "slug": "v0-vercel-review-ai-ui-code-generation",
-            "category": "AI Coding Tools",
-            "excerpt": "v0 by Vercel turns plain English descriptions into production-ready React and Tailwind CSS code. I tested it on real projects to see if it actually saves time or just creates more work.",
-            "reading_time": 7,
-            "meta_description": "Honest v0 by Vercel review — AI UI code generation tested on real projects. Pricing, pros, cons, and whether it's worth your time.",
-            "content": """## What v0 by Vercel Actually Does
+The technology is improving rapidly. The Sora of six months from now will likely be significantly more capable. For now, it's a powerful creative tool with real limitations that require creative workarounds.`,
+    excerpt: "Sora generated enormous hype with its preview videos. Now that access has expanded, I've been able to test it extensively. Here's what Sora can actually do — and why it's both impressive and more limited than the demos suggested.",
+    category: "AI Video Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Sora review — OpenAI's text-to-video model tested extensively: what works, what doesn't, and what it means for video production.",
+    reading_time: 8,
+    tags: "",
+    is_published: true,
+    published_at: "2024-11-15T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 16,
+    title: "v0 by Vercel Review: AI That Generates Production-Ready UI Code",
+    slug: "v0-vercel-review-ai-ui-code-generation",
+    content: `## What v0 by Vercel Actually Does
 
 v0 is Vercel's AI-powered tool that generates UI components from text prompts. You describe what you want — "a pricing card with three tiers, a toggle for monthly/annual, and a highlighted recommended plan" — and it spits out actual React code using Tailwind CSS and shadcn/ui components.
 
@@ -1106,16 +900,23 @@ v0 offers a free tier with limited generations. The Pro plan at $20/month gives 
 v0 is best used as a acceleration tool, not a replacement for frontend development skills. If you're comfortable with React and Tailwind, it can cut your UI development time significantly. If you're hoping it will let you build websites without knowing code, you'll be disappointed.
 
 **Rating: 4/5** — Excellent for rapid prototyping, good for component generation, needs manual refinement.
-""",
-        },
-        {
-            "title": "Devin AI Review: Can an AI Actually Be a Software Engineer?",
-            "slug": "devin-ai-review-software-engineer",
-            "category": "AI Coding Tools",
-            "excerpt": "Devin by Cognition bills itself as the world's first AI software engineer. I gave it real coding tasks to see if it lives up to the hype or if it's just clever marketing.",
-            "reading_time": 9,
-            "meta_description": "Devin AI review — testing the world's first AI software engineer on real tasks. Does it actually work? Pricing, capabilities, and honest assessment.",
-            "content": """## What Devin Claims to Be
+`,
+    excerpt: "v0 by Vercel turns plain English descriptions into production-ready React and Tailwind CSS code. I tested it on real projects to see if it actually saves time or just creates more work.",
+    category: "AI Coding Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Honest v0 by Vercel review — AI UI code generation tested on real projects. Pricing, pros, cons, and whether it's worth your time.",
+    reading_time: 7,
+    tags: "",
+    is_published: true,
+    published_at: "2024-11-18T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 17,
+    title: "Devin AI Review: Can an AI Actually Be a Software Engineer?",
+    slug: "devin-ai-review-software-engineer",
+    content: `## What Devin Claims to Be
 
 Devin is an autonomous AI agent developed by Cognition Labs that can plan, code, debug, and deploy software projects. Unlike coding assistants that suggest code snippets, Devin is designed to handle entire engineering tasks from start to finish — given a natural language description, it creates a plan, writes the code, tests it, and iterates until it works.
 
@@ -1156,16 +957,23 @@ Devin offers a limited free trial. The Team plan starts at $500/month with a cer
 Devin is a remarkable technical achievement that demonstrates how far AI has come in code generation. For well-defined, isolated tasks, it can genuinely accelerate development. But it's not the autonomous software engineer the marketing suggests — not yet. It's a powerful tool that still needs human oversight, architectural guidance, and integration work.
 
 **Rating: 3.5/5** — Impressive for specific tasks, not ready to replace developers, expensive for what it delivers.
-""",
-        },
-        {
-            "title": "Suno AI Review: AI Music Generation That Actually Sounds Good",
-            "slug": "suno-ai-review-music-generation",
-            "category": "AI Audio Tools",
-            "excerpt": "Suno AI generates full songs — vocals, instruments, and all — from text prompts. I tested it across multiple genres to see if AI music has finally crossed the quality threshold.",
-            "reading_time": 7,
-            "meta_description": "Suno AI review — full song generation from text prompts. Tested across genres. Pricing, quality assessment, and whether it's worth using.",
-            "content": """## What Suno AI Does
+`,
+    excerpt: "Devin by Cognition bills itself as the world's first AI software engineer. I gave it real coding tasks to see if it lives up to the hype or if it's just clever marketing.",
+    category: "AI Coding Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Devin AI review — testing the world's first AI software engineer on real tasks. Does it actually work? Pricing, capabilities, and honest assessment.",
+    reading_time: 9,
+    tags: "",
+    is_published: true,
+    published_at: "2024-11-20T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 18,
+    title: "Suno AI Review: AI Music Generation That Actually Sounds Good",
+    slug: "suno-ai-review-music-generation",
+    content: `## What Suno AI Does
 
 Suno is an AI music generation tool that creates complete songs from text descriptions. You describe the style, mood, and lyrics (or let it write them), and Suno generates a full track with vocals, instruments, mixing, and mastering. It's not just generating melodies — it's producing radio-ready songs.
 
@@ -1204,16 +1012,23 @@ The copyright status of AI-generated music is still unsettled. Suno's terms gran
 Suno AI represents a genuine leap in music generation technology. It's not going to replace songwriters or producers, but it's a powerful tool for content creators who need original music without licensing hassles. The quality is good enough for most commercial applications, and the pricing is reasonable.
 
 **Rating: 4/5** — Best-in-class music generation, great for content creators, limited for serious musicians.
-""",
-        },
-        {
-            "title": "Kling AI Review: AI Video Generation That Actually Impresses",
-            "slug": "kling-ai-review-video-generation",
-            "category": "AI Video Tools",
-            "excerpt": "Kling AI from Kuaishou generates stunning video clips from text and images. I tested it against Sora and Runway to see where it stands in the AI video race.",
-            "reading_time": 8,
-            "meta_description": "Kling AI review — text-to-video and image-to-video generation tested. How does it compare to Sora and Runway? Quality, pricing, and real examples.",
-            "content": """## What Makes Kling AI Different
+`,
+    excerpt: "Suno AI generates full songs — vocals, instruments, and all — from text prompts. I tested it across multiple genres to see if AI music has finally crossed the quality threshold.",
+    category: "AI Audio Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Suno AI review — full song generation from text prompts. Tested across genres. Pricing, quality assessment, and whether it's worth using.",
+    reading_time: 7,
+    tags: "",
+    is_published: true,
+    published_at: "2024-11-22T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 19,
+    title: "Kling AI Review: AI Video Generation That Actually Impresses",
+    slug: "kling-ai-review-video-generation",
+    content: `## What Makes Kling AI Different
 
 Kling is an AI video generation tool developed by Kuaishou, one of China's largest short-video platforms. It generates video clips from text prompts or reference images, with support for up to 2-minute videos at 1080p resolution. What sets it apart is its consistency in maintaining character appearance and scene coherence across longer clips.
 
@@ -1244,16 +1059,23 @@ Kling offers a free tier with limited, watermarked generations. The Standard pla
 Kling AI is one of the most capable AI video generation tools available. It produces visually impressive results, handles longer clips better than most competitors, and offers reasonable pricing. For content creators, marketers, and social media managers, it's a genuinely useful tool.
 
 **Rating: 4/5** — Best-in-class for image-to-video, solid text-to-video, good pricing for what you get.
-""",
-        },
-        {
-            "title": "Luma Dream Machine Review: AI Video That Feels Cinematic",
-            "slug": "luma-dream-machine-review-ai-video",
-            "category": "AI Video Tools",
-            "excerpt": "Luma Dream Machine creates cinematic video clips with impressive visual quality. I tested it for social media content and creative projects to see how it compares.",
-            "reading_time": 7,
-            "meta_description": "Luma Dream Machine review — cinematic AI video generation tested. Quality, ease of use, pricing, and comparison with competitors.",
-            "content": """## What Luma Dream Machine Offers
+`,
+    excerpt: "Kling AI from Kuaishou generates stunning video clips from text and images. I tested it against Sora and Runway to see where it stands in the AI video race.",
+    category: "AI Video Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Kling AI review — text-to-video and image-to-video generation tested. How does it compare to Sora and Runway? Quality, pricing, and real examples.",
+    reading_time: 8,
+    tags: "",
+    is_published: true,
+    published_at: "2024-11-24T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 20,
+    title: "Luma Dream Machine Review: AI Video That Feels Cinematic",
+    slug: "luma-dream-machine-review-ai-video",
+    content: `## What Luma Dream Machine Offers
 
 Luma Dream Machine is an AI video generation tool that creates video clips from text descriptions and images. It's designed for creators who want cinematic-quality video without the complexity of traditional video production. The tool focuses on visual quality and ease of use over maximum customization.
 
@@ -1290,16 +1112,23 @@ Luma offers a free tier with limited generations and watermarks. The Standard pl
 Luma Dream Machine excels at creating visually beautiful, cinematic video clips. It's particularly strong for social media content, mood boards, and creative visualization. The limited control and duration restrictions mean it's best used as a complement to other tools rather than a complete video production solution.
 
 **Rating: 3.5/5** — Beautiful output, easy to use, limited control and duration.
-""",
-        },
-        {
-            "title": "Ideogram Review: AI Image Generation That Actually Gets Text Right",
-            "slug": "ideogram-review-ai-image-text",
-            "category": "AI Image Generation",
-            "excerpt": "Ideogram is the AI image generator that finally nails text rendering. I tested it for logos, posters, and marketing materials to see if it's truly the best at typography.",
-            "reading_time": 7,
-            "meta_description": "Ideogram review — AI image generation with best-in-class text rendering. Tested for logos, posters, and marketing. Pricing and comparison.",
-            "content": """## The Text Rendering Problem
+`,
+    excerpt: "Luma Dream Machine creates cinematic video clips with impressive visual quality. I tested it for social media content and creative projects to see how it compares.",
+    category: "AI Video Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Luma Dream Machine review — cinematic AI video generation tested. Quality, ease of use, pricing, and comparison with competitors.",
+    reading_time: 7,
+    tags: "",
+    is_published: true,
+    published_at: "2024-11-26T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 21,
+    title: "Ideogram Review: AI Image Generation That Actually Gets Text Right",
+    slug: "ideogram-review-ai-image-text",
+    content: `## The Text Rendering Problem
 
 Every AI image generator has struggled with text. Ask Midjourney or DALL-E to create a sign with specific words, and you'll get gibberish 90% of the time. This limitation has made AI image generation impractical for many real-world use cases — logos, posters, product packaging, and marketing materials all require readable text.
 
@@ -1342,16 +1171,23 @@ Ideogram offers a free tier with limited generations and watermarks. The Basic p
 Ideogram fills a genuine gap in the AI image generation market. If your use case involves text in images — and most real-world use cases do — it's the best tool available. The image quality is competitive, and the text rendering is genuinely useful rather than just a novelty.
 
 **Rating: 4.5/5** — Best-in-class text rendering, competitive image quality, practical for real-world use.
-""",
-        },
-        {
-            "title": "Pika Review: AI Video Generation for the Rest of Us",
-            "slug": "pika-review-ai-video-generation",
-            "category": "AI Video Tools",
-            "excerpt": "Pika makes AI video generation accessible with a simple interface and solid results. I tested it for social media content to see if it's the right tool for casual creators.",
-            "reading_time": 6,
-            "meta_description": "Pika AI video review — accessible video generation for creators. Ease of use, quality, pricing, and who it's best for.",
-            "content": """## What Pika Offers
+`,
+    excerpt: "Ideogram is the AI image generator that finally nails text rendering. I tested it for logos, posters, and marketing materials to see if it's truly the best at typography.",
+    category: "AI Image Generation",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Ideogram review — AI image generation with best-in-class text rendering. Tested for logos, posters, and marketing. Pricing and comparison.",
+    reading_time: 7,
+    tags: "",
+    is_published: true,
+    published_at: "2024-11-28T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 22,
+    title: "Pika Review: AI Video Generation for the Rest of Us",
+    slug: "pika-review-ai-video-generation",
+    content: `## What Pika Offers
 
 Pika is an AI video generation tool designed for accessibility. While competitors focus on maximum quality or advanced features, Pika prioritizes ease of use and quick results. It generates video clips from text prompts and images with a focus on social media content.
 
@@ -1398,16 +1234,23 @@ Pika is ideal for:
 Pika prioritizes accessibility over maximum quality. It won't produce the most stunning AI videos available, but it will produce good videos quickly and easily. For most creators, that trade-off makes sense.
 
 **Rating: 3.5/5** — Easy to use, good quality, limited advanced features.
-""",
-        },
-        {
-            "title": "Mistral AI Review: Europe's Answer to ChatGPT",
-            "slug": "mistral-ai-review-european-chatgpt",
-            "category": "AI Chatbots",
-            "excerpt": "Mistral AI is Europe's leading large language model. I tested it against ChatGPT and Claude to see if it can compete on quality while offering better data privacy.",
-            "reading_time": 8,
-            "meta_description": "Mistral AI review — Europe's leading LLM tested against ChatGPT and Claude. Quality, privacy advantages, pricing, and real-world performance.",
-            "content": """## Why Mistral AI Matters
+`,
+    excerpt: "Pika makes AI video generation accessible with a simple interface and solid results. I tested it for social media content to see if it's the right tool for casual creators.",
+    category: "AI Video Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Pika AI video review — accessible video generation for creators. Ease of use, quality, pricing, and who it's best for.",
+    reading_time: 6,
+    tags: "",
+    is_published: true,
+    published_at: "2024-11-30T00:00:00Z",
+    updated_at: "2024-12-01T00:00:00Z",
+  },
+  {
+    id: 23,
+    title: "Mistral AI Review: Europe's Answer to ChatGPT",
+    slug: "mistral-ai-review-european-chatgpt",
+    content: `## Why Mistral AI Matters
 
 Mistral AI is a French AI company that's become Europe's leading contender in the large language model race. In a market dominated by American companies, Mistral offers something different: a high-quality AI assistant built with European values around data privacy and regulation compliance.
 
@@ -1456,16 +1299,23 @@ Mistral AI is a legitimate competitor to the American AI giants. It doesn't quit
 For European businesses, privacy-conscious users, and anyone looking for a strong alternative to the US-dominated AI landscape, Mistral is worth serious consideration.
 
 **Rating: 4/5** — Strong performance, excellent privacy stance, competitive pricing.
-""",
-        },
-        {
-            "title": "Meta Llama 3 Review: The Best Open Source AI Model",
-            "slug": "meta-llama-3-review-open-source-ai",
-            "category": "AI Chatbots",
-            "excerpt": "Meta's Llama 3 is the most capable open source language model available. I tested it locally and via API to see if open source AI can truly compete with closed models.",
-            "reading_time": 9,
-            "meta_description": "Meta Llama 3 review — best open source AI model tested. Local deployment, API access, performance comparison, and whether open source can compete.",
-            "content": """## What Llama 3 Represents
+`,
+    excerpt: "Mistral AI is Europe's leading large language model. I tested it against ChatGPT and Claude to see if it can compete on quality while offering better data privacy.",
+    category: "AI Chatbots",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Mistral AI review — Europe's leading LLM tested against ChatGPT and Claude. Quality, privacy advantages, pricing, and real-world performance.",
+    reading_time: 8,
+    tags: "",
+    is_published: true,
+    published_at: "2024-12-02T00:00:00Z",
+    updated_at: "2024-12-15T00:00:00Z",
+  },
+  {
+    id: 24,
+    title: "Meta Llama 3 Review: The Best Open Source AI Model",
+    slug: "meta-llama-3-review-open-source-ai",
+    content: `## What Llama 3 Represents
 
 Meta's Llama 3 isn't just another language model — it's a statement about the future of AI. By releasing a genuinely capable model as open source, Meta has made high-quality AI accessible to anyone with sufficient computing resources. This changes the economics and accessibility of AI fundamentally.
 
@@ -1512,16 +1362,23 @@ Meta Llama 3 is the most significant open source AI release to date. It demonstr
 The hardware requirements for local deployment remain a barrier, but API access and cloud providers are making Llama 3 increasingly accessible.
 
 **Rating: 4.5/5** — Best open source model available, genuine alternative to closed models, hardware requirements are the main limitation.
-""",
-        },
-        {
-            "title": "Synthesia Review: AI Video Avatars for Business Content",
-            "slug": "synthesia-review-ai-video-avatars",
-            "category": "AI Video Tools",
-            "excerpt": "Synthesia creates professional videos with AI avatars that look remarkably human. I tested it for training videos and marketing content to see if it replaces traditional video production.",
-            "reading_time": 7,
-            "meta_description": "Synthesia review — AI avatar video creation for business. Tested for training and marketing. Quality, pricing, and whether it replaces real presenters.",
-            "content": """## What Synthesia Does
+`,
+    excerpt: "Meta's Llama 3 is the most capable open source language model available. I tested it locally and via API to see if open source AI can truly compete with closed models.",
+    category: "AI Chatbots",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Meta Llama 3 review — best open source AI model tested. Local deployment, API access, performance comparison, and whether open source can compete.",
+    reading_time: 9,
+    tags: "",
+    is_published: true,
+    published_at: "2024-12-04T00:00:00Z",
+    updated_at: "2024-12-15T00:00:00Z",
+  },
+  {
+    id: 25,
+    title: "Synthesia Review: AI Video Avatars for Business Content",
+    slug: "synthesia-review-ai-video-avatars",
+    content: `## What Synthesia Does
 
 Synthesia is an AI video generation platform that creates professional videos featuring realistic AI avatars. You type a script, choose an avatar, select a background, and Synthesia produces a video of the avatar delivering your script. It's designed for business use cases: training videos, marketing content, product demonstrations, and corporate communications.
 
@@ -1572,66 +1429,16 @@ Custom avatar creation requires cooperation from the person being avatar-ified, 
 Synthesia excels at its specific use case: creating professional business videos with AI avatars. It's not a replacement for all video production, but for training content, corporate communications, and standardized marketing videos, it offers significant cost and time savings.
 
 **Rating: 4/5** — Excellent for business use cases, realistic avatars, limited for creative or emotional content.
-""",
-        },
-    ]
-
-    for a in articles:
-        await conn.execute(
-            """INSERT INTO articles (title,slug,content,excerpt,category,reading_time,meta_description,author,is_published)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-               ON CONFLICT (slug) DO NOTHING""",
-            a["title"], a["slug"], a["content"], a["excerpt"],
-            a["category"], a["reading_time"], a["meta_description"],
-            "Admin", True
-        )
-
-@app.get("/api/tags")
-async def get_tags():
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT tags FROM articles WHERE is_published=true AND tags != \'\'"
-        )
-        all_tags: dict[str, int] = {}
-        for row in rows:
-            for tag in row["tags"].split(","):
-                tag = tag.strip()
-                if tag:
-                    all_tags[tag] = all_tags.get(tag, 0) + 1
-        return [{"tag": k, "count": v} for k, v in sorted(all_tags.items(), key=lambda x: -x[1])]
-
-@app.get("/api/articles/tag/{tag}")
-async def get_articles_by_tag(tag: str, page: int = 1, limit: int = 12):
-    async with db_pool.acquire() as conn:
-        pattern = f"%{tag}%"
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM articles WHERE is_published=true AND tags ILIKE $1", pattern
-        )
-        offset = (page - 1) * limit
-        rows = await conn.fetch(
-            "SELECT * FROM articles WHERE is_published=true AND tags ILIKE $1 ORDER BY published_at DESC LIMIT $2 OFFSET $3",
-            pattern, limit, offset
-        )
-        return {"articles": [dict(r) for r in rows], "total": total, "page": page, "pages": (total + limit - 1) // limit}
-
-
-
-class ChangePassword(BaseModel):
-    current_password: str
-    new_password: str
-
-@app.post("/api/admin/change-password")
-async def change_password(data: ChangePassword, admin=Depends(get_current_admin)):
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM admins WHERE username=$1", admin)
-        if not row or not bcrypt.checkpw(data.current_password.encode(), row["password_hash"].encode()):
-            raise HTTPException(status_code=401, detail="Current password is incorrect")
-        if len(data.new_password) < 8:
-            raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
-        new_hash = bcrypt.hashpw(data.new_password.encode(), bcrypt.gensalt()).decode()
-        await conn.execute("UPDATE admins SET password_hash=$1 WHERE username=$2", new_hash, admin)
-        return {"message": "Password changed successfully"}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+`,
+    excerpt: "Synthesia creates professional videos with AI avatars that look remarkably human. I tested it for training videos and marketing content to see if it replaces traditional video production.",
+    category: "AI Video Tools",
+    author: "Admin",
+    image_url: undefined,
+    meta_description: "Synthesia review — AI avatar video creation for business. Tested for training and marketing. Quality, pricing, and whether it replaces real presenters.",
+    reading_time: 7,
+    tags: "",
+    is_published: true,
+    published_at: "2024-12-06T00:00:00Z",
+    updated_at: "2024-12-15T00:00:00Z",
+  },
+];

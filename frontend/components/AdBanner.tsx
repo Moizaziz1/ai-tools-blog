@@ -8,8 +8,7 @@ interface Props {
   className?: string;
 }
 
-// Replace XXXXXXXXXXXXXXXX with your actual AdSense publisher ID
-const ADSENSE_CLIENT = "ca-pub-XXXXXXXXXXXXXXXX";
+const ADSENSE_CLIENT = process.env.NEXT_PUBLIC_ADSENSE_ID || "";
 
 export default function AdBanner({ slot, style, format = "auto", className }: Props) {
   const adRef = useRef<HTMLModElement>(null);

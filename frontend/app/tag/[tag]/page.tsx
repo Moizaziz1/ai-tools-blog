@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { Metadata } from "next";
 import ArticleCard from "@/components/ArticleCard";
 import type { Article } from "@/lib/api";
+import { mockArticles } from "@/lib/mockArticles";
 import { Tag } from "lucide-react";
 
 export const dynamic = "force-dynamic";
@@ -42,23 +43,36 @@ export default async function TagPage({ params, searchParams }: Props) {
     }
   } catch {}
 
+  if (articles.length === 0) {
+    const tagLower = tag.toLowerCase();
+    const filtered = mockArticles.filter(
+      a => a.tags?.toLowerCase().includes(tagLower) ||
+           a.title.toLowerCase().includes(tagLower) ||
+           a.category.toLowerCase().includes(tagLower)
+    );
+    total = filtered.length;
+    pages = Math.ceil(total / 12);
+    const start = (page - 1) * 12;
+    articles = filtered.slice(start, start + 12);
+  }
+
   return (
     <div>
       {/* Header */}
-      <div style={{ background: "#fff", borderBottom: "1px solid #ede9e0", padding: "2.5rem 1.5rem" }}>
+      <div style={{ background: "var(--bg-card)", borderBottom: "1px solid var(--border)", padding: "2.5rem 1.5rem" }}>
         <div style={{ maxWidth: "1200px", margin: "0 auto" }}>
-          <Link href="/articles" style={{ color: "#6b6862", textDecoration: "none", fontSize: "0.82rem", marginBottom: "1rem", display: "inline-block" }}>
+          <Link href="/articles" style={{ color: "var(--text-muted)", textDecoration: "none", fontSize: "0.82rem", marginBottom: "1rem", display: "inline-block" }}>
             ← All Articles
           </Link>
           <div style={{ display: "flex", alignItems: "center", gap: "0.875rem" }}>
-            <div style={{ width: "44px", height: "44px", borderRadius: "10px", background: "#e85d2618", display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <Tag size={20} color="#e85d26" />
+            <div style={{ width: "44px", height: "44px", borderRadius: "10px", background: "var(--accent-pale)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Tag size={20} color="var(--accent)" />
             </div>
             <div>
-              <h1 style={{ fontFamily: "var(--font-display)", fontSize: "1.75rem", fontWeight: 400, color: "#0f0f0f", marginBottom: "0.2rem" }}>
+              <h1 style={{ fontFamily: "var(--font-display)", fontSize: "1.75rem", fontWeight: 400, color: "var(--text-header)", marginBottom: "0.2rem" }}>
                 #{tag}
               </h1>
-              <p style={{ color: "#6b6862", fontSize: "0.875rem" }}>
+              <p style={{ color: "var(--text-muted)", fontSize: "0.875rem" }}>
                 {total} article{total !== 1 ? "s" : ""} tagged
               </p>
             </div>
@@ -68,9 +82,9 @@ export default async function TagPage({ params, searchParams }: Props) {
 
       <div style={{ maxWidth: "1200px", margin: "0 auto", padding: "2.5rem 1.5rem" }}>
         {articles.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "4rem 2rem", color: "#6b6862" }}>
+          <div style={{ textAlign: "center", padding: "4rem 2rem", color: "var(--text-muted)" }}>
             <p style={{ fontSize: "1.1rem", marginBottom: "0.5rem" }}>No articles found for #{tag}</p>
-            <Link href="/articles" style={{ color: "#e85d26", textDecoration: "none", fontWeight: 600 }}>
+            <Link href="/articles" style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
               Browse all articles →
             </Link>
           </div>
@@ -87,17 +101,17 @@ export default async function TagPage({ params, searchParams }: Props) {
             {pages > 1 && (
               <div style={{ display: "flex", gap: "0.5rem", justifyContent: "center" }}>
                 {page > 1 && (
-                  <Link href={`?page=${page - 1}`} style={{ padding: "0.5rem 1rem", border: "1px solid #ede9e0", borderRadius: "8px", textDecoration: "none", color: "#1a1a1a", background: "#fff", fontSize: "0.875rem" }}>← Prev</Link>
+                  <Link href={`?page=${page - 1}`} style={{ padding: "0.5rem 1rem", border: "1px solid var(--border)", borderRadius: "8px", textDecoration: "none", color: "var(--text)", background: "var(--bg-card)", fontSize: "0.875rem" }}>← Prev</Link>
                 )}
                 {Array.from({ length: Math.min(pages, 7) }, (_, i) => {
                   const p = i + 1;
                   return (
                     <Link key={p} href={`?page=${p}`}
-                      style={{ padding: "0.5rem 0.875rem", border: "1px solid", borderColor: p === page ? "#e85d26" : "#ede9e0", borderRadius: "8px", textDecoration: "none", color: p === page ? "#fff" : "#1a1a1a", background: p === page ? "#e85d26" : "#fff", fontSize: "0.875rem", fontWeight: p === page ? 700 : 400 }}>{p}</Link>
+                      style={{ padding: "0.5rem 0.875rem", border: "1px solid", borderColor: p === page ? "var(--accent)" : "var(--border)", borderRadius: "8px", textDecoration: "none", color: p === page ? "#fff" : "var(--text)", background: p === page ? "var(--accent)" : "var(--bg-card)", fontSize: "0.875rem", fontWeight: p === page ? 700 : 400 }}>{p}</Link>
                   );
                 })}
                 {page < pages && (
-                  <Link href={`?page=${page + 1}`} style={{ padding: "0.5rem 1rem", border: "1px solid #ede9e0", borderRadius: "8px", textDecoration: "none", color: "#1a1a1a", background: "#fff", fontSize: "0.875rem" }}>Next →</Link>
+                  <Link href={`?page=${page + 1}`} style={{ padding: "0.5rem 1rem", border: "1px solid var(--border)", borderRadius: "8px", textDecoration: "none", color: "var(--text)", background: "var(--bg-card)", fontSize: "0.875rem" }}>Next →</Link>
                 )}
               </div>
             )}

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Mail, MessageSquare, Clock, ArrowLeft } from "lucide-react";
+import ContactForm from "@/components/ContactForm";
 
 export const metadata: Metadata = {
   title: "Contact Us",
@@ -60,51 +61,6 @@ export default function ContactPage() {
           <li><strong>General feedback</strong> — We genuinely want to know what&apos;s useful and what isn&apos;t.</li>
         </ul>
       </div>
-    </div>
-  );
-}
-
-function ContactForm() {
-  return (
-    <div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem", marginBottom: "1rem" }}>
-        <div>
-          <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 700, color: "var(--text-soft)", marginBottom: "0.5rem", textTransform: "uppercase" as const, letterSpacing: "0.06em" }}>Name</label>
-          <input type="text" placeholder="Your name"
-            className="input-focus"
-            style={{ width: "100%", padding: "0.8rem 1rem", border: "1.5px solid var(--border)", borderRadius: "10px", fontSize: "0.925rem", outline: "none", color: "var(--text)", background: "var(--bg-card)" }} />
-        </div>
-        <div>
-          <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 700, color: "var(--text-soft)", marginBottom: "0.5rem", textTransform: "uppercase" as const, letterSpacing: "0.06em" }}>Email</label>
-          <input type="email" placeholder="your@email.com"
-            className="input-focus"
-            style={{ width: "100%", padding: "0.8rem 1rem", border: "1.5px solid var(--border)", borderRadius: "10px", fontSize: "0.925rem", outline: "none", color: "var(--text)", background: "var(--bg-card)" }} />
-        </div>
-      </div>
-      <div style={{ marginBottom: "1rem" }}>
-        <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 700, color: "var(--text-soft)", marginBottom: "0.5rem", textTransform: "uppercase" as const, letterSpacing: "0.06em" }}>Subject</label>
-        <select className="input-focus" style={{ width: "100%", padding: "0.8rem 1rem", border: "1.5px solid var(--border)", borderRadius: "10px", fontSize: "0.925rem", outline: "none", color: "var(--text)", background: "var(--bg-card)", cursor: "pointer" }}>
-          <option>General inquiry</option>
-          <option>Factual correction</option>
-          <option>Tool suggestion</option>
-          <option>Technical issue</option>
-          <option>Other</option>
-        </select>
-      </div>
-      <div style={{ marginBottom: "1.5rem" }}>
-        <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 700, color: "var(--text-soft)", marginBottom: "0.5rem", textTransform: "uppercase" as const, letterSpacing: "0.06em" }}>Message</label>
-        <textarea rows={5} placeholder="What would you like to tell us?"
-          className="input-focus"
-          style={{ width: "100%", padding: "0.8rem 1rem", border: "1.5px solid var(--border)", borderRadius: "10px", fontSize: "0.925rem", outline: "none", color: "var(--text)", background: "var(--bg-card)", resize: "vertical" as const, lineHeight: 1.7 }} />
-      </div>
-      <div style={{ background: "var(--accent-pale)", border: "1px solid var(--accent)", borderRadius: "10px", padding: "0.875rem 1.125rem", marginBottom: "1.25rem", fontSize: "0.85rem", color: "var(--accent)" }}>
-        This is a static form — please email us directly at{" "}
-        <a href="mailto:hello@aitoolshub.com" style={{ color: "var(--accent)", fontWeight: 700 }}>hello@aitoolshub.com</a>
-        {" "}until form submission is wired up to your backend.
-      </div>
-      <button type="button" className="btn-primary">
-        Send Message
-      </button>
     </div>
   );
 }

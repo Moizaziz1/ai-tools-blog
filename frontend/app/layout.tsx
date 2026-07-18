@@ -1,12 +1,34 @@
 import type { Metadata } from "next";
+import { DM_Serif_Display, Inter, DM_Mono } from "next/font/google";
 import "./globals.css";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 import NewsletterSection from "@/components/NewsletterSection";
 import StructuredData from "@/components/StructuredData";
 import { ThemeProvider } from "@/lib/theme";
+import Analytics from "@/components/Analytics";
 
 const SITE_URL = "https://aitoolshub.com";
+
+const dmSerif = DM_Serif_Display({
+  weight: "400",
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-dm-serif",
+});
+
+const inter = Inter({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-inter",
+});
+
+const dmMono = DM_Mono({
+  weight: ["400", "500"],
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-dm-mono",
+});
 
 export const metadata: Metadata = {
   title: {
@@ -34,7 +56,7 @@ export const metadata: Metadata = {
     description: "Real reviews from real users on every AI tool that matters.",
     images: [
       {
-        url: `${SITE_URL}/og-image.png`,
+        url: `${SITE_URL}/og-image.svg`,
         width: 1200,
         height: 630,
         alt: "AIToolsHub — Honest AI Tool Reviews",
@@ -47,7 +69,7 @@ export const metadata: Metadata = {
     creator: "@aitoolshub",
     title: "AIToolsHub — Honest Reviews of AI Tools",
     description: "Real reviews from real users on every AI tool that matters.",
-    images: [`${SITE_URL}/og-image.png`],
+    images: [`${SITE_URL}/og-image.svg`],
   },
   robots: {
     index: true,
@@ -56,19 +78,13 @@ export const metadata: Metadata = {
   },
 };
 
-const ADSENSE_PUB_ID = "ca-pub-XXXXXXXXXXXXXXXX";
-const ENABLE_ADSENSE = false;
+const ADSENSE_PUB_ID = process.env.NEXT_PUBLIC_ADSENSE_ID || "";
+const ENABLE_ADSENSE = !!ADSENSE_PUB_ID;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning className={`${dmSerif.variable} ${inter.variable} ${dmMono.variable}`}>
       <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Inter:wght@300;400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap"
-          rel="stylesheet"
-        />
         <link rel="alternate" type="application/rss+xml" title="AIToolsHub RSS Feed" href="/feed.xml" />
         <meta name="theme-color" content="#6c3ce9" />
         {ENABLE_ADSENSE && (
@@ -81,6 +97,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <StructuredData type="website" />
       </head>
       <body style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+        <Analytics />
         <ThemeProvider>
           <Header />
           <main style={{ flex: 1 }}>{children}</main>

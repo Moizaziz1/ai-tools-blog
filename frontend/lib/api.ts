@@ -1,3 +1,5 @@
+import { mockArticles } from "./mockArticles";
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export interface Article {
@@ -44,24 +46,52 @@ export async function getArticles(
   category?: string,
   search?: string
 ): Promise<ArticlesResponse> {
-  const params = new URLSearchParams({ page: String(page), limit: String(limit) });
-  if (category) params.set("category", category);
-  if (search) params.set("search", search);
-  const res = await fetch(`${API_URL}/api/articles?${params}`, { next: { revalidate: 60 } });
-  if (!res.ok) throw new Error("Failed to fetch articles");
-  return res.json();
+  try {
+    const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+    if (category) params.set("category", category);
+    if (search) params.set("search", search);
+    const res = await fetch(`${API_URL}/api/articles?${params}`, { next: { revalidate: 60 } });
+    if (!res.ok) throw new Error("Failed to fetch articles");
+    return res.json();
+  } catch {
+    let filtered = [...mockArticles];
+    if (category) filtered = filtered.filter(a => a.category === category);
+    if (search) {
+      const q = search.toLowerCase();
+      filtered = filtered.filter(a => a.title.toLowerCase().includes(q) || a.excerpt.toLowerCase().includes(q));
+    }
+    const total = filtered.length;
+    const pages = Math.ceil(total / limit);
+    const start = (page - 1) * limit;
+    const articles = filtered.slice(start, start + limit);
+    return { articles, total, page, pages };
+  }
 }
 
 export async function getArticle(slug: string): Promise<Article> {
-  const res = await fetch(`${API_URL}/api/articles/${slug}`, { next: { revalidate: 60 } });
-  if (!res.ok) throw new Error("Article not found");
-  return res.json();
+  try {
+    const res = await fetch(`${API_URL}/api/articles/${slug}`, { next: { revalidate: 60 } });
+    if (!res.ok) throw new Error("Article not found");
+    return res.json();
+  } catch {
+    const article = mockArticles.find(a => a.slug === slug);
+    if (!article) throw new Error("Article not found");
+    return article;
+  }
 }
 
 export async function getCategories(): Promise<Category[]> {
-  const res = await fetch(`${API_URL}/api/categories`, { next: { revalidate: 60 } });
-  if (!res.ok) throw new Error("Failed to fetch categories");
-  return res.json();
+  try {
+    const res = await fetch(`${API_URL}/api/categories`, { next: { revalidate: 60 } });
+    if (!res.ok) throw new Error("Failed to fetch categories");
+    return res.json();
+  } catch {
+    const catMap = new Map<string, number>();
+    mockArticles.forEach(a => catMap.set(a.category, (catMap.get(a.category) || 0) + 1));
+    return Array.from(catMap.entries())
+      .map(([category, count]) => ({ category, count }))
+      .sort((a, b) => b.count - a.count);
+  }
 }
 
 // ─── Admin API ────────────────────────────────────────────────────────────────

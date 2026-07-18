@@ -26,11 +26,10 @@ export async function GET() {
     <lastBuildDate>${new Date().toUTCString()}</lastBuildDate>
     <atom:link href="${BASE_URL}/feed.xml" rel="self" type="application/rss+xml"/>
     <image>
-      <url>${BASE_URL}/logo.png</url>
+      <url>${BASE_URL}/logo.svg</url>
       <title>AIToolsHub</title>
       <link>${BASE_URL}</link>
-    </image>
-    ${articles
+    </image>${articles
       .map(
         (article) => `
     <item>
@@ -50,7 +49,7 @@ export async function GET() {
 
   return new Response(rss, {
     headers: {
-      "Content-Type": "application/xml; charset=utf-8",
+      "Content-Type": "application/rss+xml; charset=utf-8",
       "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
     },
   });
