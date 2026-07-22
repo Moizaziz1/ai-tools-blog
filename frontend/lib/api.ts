@@ -1,6 +1,6 @@
 import { mockArticles } from "./mockArticles";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://moizaziz16-ai-tools-hub.hf.space";
 
 export interface Article {
   id: number;

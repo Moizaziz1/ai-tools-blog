@@ -23,11 +23,5 @@
         { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
       ]
     }
-  ],
-  "rewrites": [
-    {
-      "source": "/api/:path*",
-      "destination": "https://moizaziz16-ai-tools-hub.hf.space/api/:path*"
-    }
   ]
 }
