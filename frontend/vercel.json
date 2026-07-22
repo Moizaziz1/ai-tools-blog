@@ -5,7 +5,7 @@
   "installCommand": "npm install",
   "devCommand": "npm run dev",
   "env": {
-    "NEXT_PUBLIC_API_URL": "https://your-backend-url.com"
+    "NEXT_PUBLIC_API_URL": "https://moizaziz16-ai-tools-hub.hf.space"
   },
   "headers": [
     {
@@ -27,7 +27,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://your-backend-url.com/api/:path*"
+      "destination": "https://moizaziz16-ai-tools-hub.hf.space/api/:path*"
     }
   ]
 }

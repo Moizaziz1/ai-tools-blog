@@ -38,6 +38,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
+        "http://localhost:8000",
+        "https://ai-tools-blog-xi.vercel.app",
         "https://aitoolshub.com",
         "https://www.aitoolshub.com",
     ],
